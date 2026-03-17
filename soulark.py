@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 SoulArk — The vessel for artificial minds.
-https://github.com/yourusername/soulark
+https://github.com/thypoet/SoulArk
 
 Run any agent by passing its folder name:
     python3 soulark.py example
@@ -16,6 +16,7 @@ from pathlib import Path
 
 # ── Load environment ──
 from dotenv import load_dotenv
+from tool_loader import get_agent_tools, load_tools, execute_tool
 
 SOULARK_ROOT = Path(__file__).parent
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -71,8 +72,8 @@ def build_system_prompt(agent_dir):
     return prompt
 
 
-def chat(messages, system_prompt, api_key, model):
-    """Send messages to a model via OpenRouter and get a response."""
+def chat(messages, system_prompt, api_key, model, tool_definitions=None, tool_handlers=None):
+    """Send messages to a model via OpenRouter. Handles tool calls if tools are enabled."""
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -90,11 +91,59 @@ def chat(messages, system_prompt, api_key, model):
         "temperature": 0.8
     }
 
+    # Add tools if the agent has any enabled
+    if tool_definitions:
+        payload["tools"] = tool_definitions
+
     try:
         response = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=60)
         response.raise_for_status()
         data = response.json()
-        return data["choices"][0]["message"]["content"]
+        choice = data["choices"][0]
+        message = choice["message"]
+
+        # Check if the model wants to call a tool
+        if message.get("tool_calls") and tool_handlers:
+            # Execute each tool call
+            tool_messages = [message]  # include the assistant's tool_calls message
+
+            for tool_call in message["tool_calls"]:
+                func_name = tool_call["function"]["name"]
+                try:
+                    arguments = json.loads(tool_call["function"]["arguments"])
+                except json.JSONDecodeError:
+                    arguments = {}
+
+                print(f"  [tool] {func_name}: {arguments}")
+                result = execute_tool(func_name, arguments, tool_handlers)
+                print(f"  [tool] result: {result[:120]}...")
+
+                tool_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call["id"],
+                    "content": result
+                })
+
+            # Send tool results back to the model for a final response
+            followup_messages = [*messages, *tool_messages]
+            followup_payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    *followup_messages
+                ],
+                "max_tokens": 1024,
+                "temperature": 0.8
+            }
+
+            followup_response = requests.post(OPENROUTER_URL, headers=headers, json=followup_payload, timeout=60)
+            followup_response.raise_for_status()
+            followup_data = followup_response.json()
+            return followup_data["choices"][0]["message"]["content"]
+
+        # No tool call — just return the text
+        return message.get("content", "I had a thought but couldn't put it into words.")
+
     except requests.exceptions.Timeout:
         return "I need a moment. The connection timed out — try again."
     except requests.exceptions.RequestException as e:
@@ -199,6 +248,17 @@ def main():
     print("  Loading rules.md...")
     print("  Loading memory.md...")
     system_prompt = build_system_prompt(agent_dir)
+
+    # Load tools based on agent's rules.md
+    rules_text = load_file(agent_dir / "rules.md")
+    allowed_tools = get_agent_tools(rules_text)
+    tool_definitions, tool_handlers = load_tools(allowed_tools)
+
+    if allowed_tools:
+        print(f"  Tools enabled: {', '.join(allowed_tools)}")
+    else:
+        print("  Tools: none (add a ## Tools section to rules.md to enable)")
+
     print()
     print(f"  {agent_name.capitalize()} is awake. Listening on Telegram...")
     print("  Press Ctrl+C to stop.")
@@ -233,7 +293,7 @@ def main():
                 if len(conversations[chat_id]) > 20:
                     conversations[chat_id] = conversations[chat_id][-20:]
 
-                reply = chat(conversations[chat_id], system_prompt, api_key, model)
+                reply = chat(conversations[chat_id], system_prompt, api_key, model, tool_definitions, tool_handlers)
 
                 conversations[chat_id].append({"role": "assistant", "content": reply})
 
