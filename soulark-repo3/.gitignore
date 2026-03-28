@@ -1,0 +1,18 @@
+# Keys — never commit these
+.env
+*.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Private agents — only push agents you want public
+# Uncomment the line below to exclude all agents except example:
+# agents/*/
+# !agents/example/
